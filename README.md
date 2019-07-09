@@ -15,7 +15,58 @@ When a user access a page for the first time through the proxy, it first fetches
 Subsequent page accesses through the proxy will simply load the content from the cache. This results in a much shorter page load times.
 
 # How to use this image
-TODO
+The following are example deployments using `docker-compose`
+## Independant deployment
+```yaml
+version: '3'
+
+services:
+  wordpress-proxy:
+    image: ragibkl/wordpress-proxy
+    ports:
+      - 80:80
+    environment:
+      UPSTREAM_URL: http://wordpress.domain.example     # base url of the upstream wordpress site
+      # UPSTREAM_URL: http://123.123.123.123            # base url of the upstream wordpress using ip address
+      # UPSTREAM_URL: http://localhost:8080             # base url of the upstream wordpress running locally on a different port
+```
+
+## Deployed together with Wordpress
+```yaml
+version: '3'
+
+services:
+  mariadb:
+    image: mariadb:10
+    volumes:
+      - mariadb-data:/var/lib/mysql
+    environment:
+      MYSQL_DATABASE: wordpress
+      MYSQL_PASSWORD: password
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_USER: user
+
+  wordpress:
+    image: wordpress
+    volumes:
+      - wordpress-data:/var/www/html/wp-content
+    environment:
+      WORDPRESS_DB_HOST: mariadb
+      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_DB_PASSWORD: password
+      WORDPRESS_DB_USER: user
+
+  wordpress-proxy:
+    image: ragibkl/wordpress-proxy
+    ports:
+      - 80:80
+    environment:
+      UPSTREAM_URL: http://wordpress    # base url of the upstream wordpress site. should be the same name as the wordpress container
+
+volumes:
+  mariadb-data:
+  wordpress-data:
+```
 
 # Development
 
@@ -33,6 +84,9 @@ TODO
 4. Give it a few minutes. Try accessing `http://localhost/` from your browser. Once everything is loaded, go ahead and install the site as normal
 5. During development, after making changes to the related files, run the start script again to see your changes
 6. When done, run the stop script. This will also remove any data or volumes that were created during development
+    ```
+    ./scripts/stop.sh
+    ```
 
 ## Contributing
 1. Currently, there is only one variable that can be tuned from the environment, i.e `UPSTREAM_URL`. Maybe we can add more if there is a use case
