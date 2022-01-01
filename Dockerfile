@@ -1,4 +1,4 @@
-FROM nginx
+FROM openresty/openresty
 
 WORKDIR /app
 
