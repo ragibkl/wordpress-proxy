@@ -2,11 +2,11 @@
 
 HTTP Caching Proxy Layer docker image for Wordpress
 
-# Description
+## Description
 
 Wordpress Proxy is a reverse proxy caching layer for Wordpress. It is based on the official OpenResty Docker image.
 
-Typically, a Worpress site is deployed on top of a Linux, Apache, Mysql and PHP (LAMP) stack. After a fresh install, with minimal plugins and a basic theme, page load times on a Wordpress times is quite low.
+Typically, a Wordpress site is deployed on top of a Linux, Apache, MySQL and PHP (LAMP) stack. After a fresh install, with minimal plugins and a basic theme, page load times on a Wordpress site is quite low.
 
 However, on a typical site with several plugins and a complex theme installed, page load times can be significant. This is because each time a page is accessed, Wordpress has to generate each page dynamically from its content and the Mysql database.
 
@@ -16,11 +16,44 @@ When a user access a page for the first time through the proxy, it first fetches
 
 Subsequent page accesses through the proxy will simply load the content from the cache. This results in a much shorter page load times.
 
-# How to use this image
+## Docker Image
+
+This app is packaged as a Docker image and publish to DockerHub [here](https://hub.docker.com/r/ragibkl/wordpress-proxy).
+
+## Environment Variables
+
+### `UPSTREAM_URL`
+
+Base url of the upstream wordpress site. Wordpress proxy will proxy the requests to this url.
+
+Default: `http://wordpress`
+
+Example values:
+
+- `http://backend.example.com` - upstream site is running on another host, reachable via the domain name
+- `http://123.123.123.123` - upstream site is running on another host, reachable via ip-address
+- `http://localhost:8080` - upstream site is running locally on port 8080
+- `http://wordpress` - upstream site is running in a Docker container with the name `wordpress`, running in the same `docker-compose` setup
+
+### `ENABLE_X_REAL_IP_HEADER`
+
+When set to `true`, adds an `X-Real-IP` header to the request.
+
+Default: `false`
+
+### `ENABLE_X_FORWARDED_FOR_HEADER`
+
+When set to `true`, adds an `X-Forwarded-For` header to the request.
+
+Default: `false`
+
+## Examples
 
 The following are example deployments using `docker-compose`
 
-## Independent deployment
+### Standalone deployment using docker-compose
+
+file: `docker-compose.yaml`
 
 ```yaml
 version: "3"
@@ -31,14 +64,16 @@ services:
     ports:
       - 80:80
     environment:
-      UPSTREAM_URL: http://wordpress.domain.example # base url of the upstream wordpress site
+      UPSTREAM_URL: http://backend.example.com # base url of the upstream wordpress site
       # UPSTREAM_URL: http://123.123.123.123 # base url of the upstream wordpress using ip address
       # UPSTREAM_URL: http://localhost:8080 # base url of the upstream wordpress running locally on a different port
       ENABLE_X_REAL_IP_HEADER: true # Adds an X-Real-IP header to the request
       ENABLE_X_FORWARDED_FOR_HEADER: true # Adds an X-Forwarded-For header to the request
 ```
 
-## Deployed together with Wordpress
+### Deployed with Wordpress and MySQL using docker-compose
+
+file: `docker-compose.yaml`
 
 ```yaml
 version: "3"
@@ -108,7 +143,3 @@ volumes:
 
 This image was inspired by the work of others, especially the `nginx` part.
 TODO: I've lost the references to them, but will add them in when I remember.
-
-# License
-
-TODO: Help me pick a license!
