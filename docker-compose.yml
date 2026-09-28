@@ -1,35 +1,52 @@
-version: '3'
+# WordPress behind wordpress-proxy. Only the proxy is published; WordPress and
+# MariaDB are reachable just from inside the compose network.
+#
+#   docker compose up -d
+#   open http://localhost:8080 and finish the WordPress install
+#
+# To put the proxy in front of an existing WordPress, you only need the
+# wordpress-proxy service and ./templates, with UPSTREAM_URL pointed at it.
 
 services:
-  mariadb:
-    image: mariadb:10
-    volumes:
-      - mariadb-data:/var/lib/mysql
+  wordpress-proxy:
+    image: nginx:1.29-alpine
+    ports:
+      - 8080:80
     environment:
-      MYSQL_DATABASE: wordpress
-      MYSQL_PASSWORD: password
-      MYSQL_ROOT_PASSWORD: password
-      MYSQL_USER: user
+      UPSTREAM_URL: http://wordpress
+      NGINX_ENTRYPOINT_LOCAL_RESOLVERS: "1"
+    volumes:
+      - ./templates:/etc/nginx/templates:ro
+      - cache:/var/cache/nginx
+    depends_on:
+      - wordpress
+    restart: unless-stopped
 
   wordpress:
-    image: wordpress
-    volumes:
-      - wordpress-data:/var/www/html/wp-content
+    image: wordpress:6-php8.3-apache
     environment:
       WORDPRESS_DB_HOST: mariadb
       WORDPRESS_DB_NAME: wordpress
-      WORDPRESS_DB_PASSWORD: password
-      WORDPRESS_DB_USER: user
-
-  wordpress-proxy:
-    image: nginx
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: change-me
     volumes:
-      - ./app/nginx.conf:/etc/nginx/conf.d/default.conf
-    ports:
-      - 80:80
+      - wordpress:/var/www/html
+    depends_on:
+      - mariadb
+    restart: unless-stopped
+
+  mariadb:
+    image: mariadb:11
     environment:
-      UPSTREAM_URL: http://wordpress
+      MARIADB_DATABASE: wordpress
+      MARIADB_USER: wordpress
+      MARIADB_PASSWORD: change-me
+      MARIADB_RANDOM_ROOT_PASSWORD: "1"
+    volumes:
+      - mariadb:/var/lib/mysql
+    restart: unless-stopped
 
 volumes:
-  mariadb-data:
-  wordpress-data:
+  cache:
+  wordpress:
+  mariadb:

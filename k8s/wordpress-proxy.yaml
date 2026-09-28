@@ -1,0 +1,84 @@
+# wordpress-proxy on Kubernetes: the official nginx image plus the template
+# from ../templates, mounted from a ConfigMap. Create the ConfigMap with:
+#
+#   kubectl -n <ns> create configmap wordpress-proxy-templates \
+#     --from-file=templates/default.conf.template
+#
+# (or generate it in kustomize/Flux next to this manifest), then point
+# UPSTREAM_URL at the WordPress Service and your Ingress at wordpress-proxy.
+#
+# Your Ingress should pass the real Host and X-Forwarded-Proto (ingress-nginx
+# does by default): both are part of the cache key and are forwarded to
+# WordPress, which needs them to render the right URLs.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wordpress-proxy
+  labels:
+    app: wordpress-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wordpress-proxy
+  template:
+    metadata:
+      labels:
+        app: wordpress-proxy
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.29-alpine
+          env:
+            - name: UPSTREAM_URL
+              value: http://wordpress   # your WordPress Service
+            - name: NGINX_ENTRYPOINT_LOCAL_RESOLVERS
+              value: "1"
+          ports:
+            - name: http
+              containerPort: 80
+          volumeMounts:
+            - name: templates
+              mountPath: /etc/nginx/templates
+              readOnly: true
+            - name: cache
+              mountPath: /var/cache/nginx
+          # /healthz is answered by nginx itself, never WordPress: a slow or
+          # down WordPress must not take the cache (and its stale pages) out.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: templates
+          configMap:
+            name: wordpress-proxy-templates
+        # The cache (max_size=2g in the template). Emptied on restart.
+        - name: cache
+          emptyDir:
+            sizeLimit: 3Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wordpress-proxy
+spec:
+  selector:
+    app: wordpress-proxy
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
