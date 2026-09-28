@@ -1,0 +1,34 @@
+name: test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      COMPOSE_PROJECT: wpp-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start the stack
+        run: docker compose -p wpp-test up -d --wait wordpress-proxy
+
+      - name: Check the rendered nginx config
+        run: docker compose -p wpp-test exec -T wordpress-proxy nginx -t
+
+      - name: Fresh install through the proxy
+        run: ./test.sh fresh
+
+      - name: Test setup
+        run: ./test.sh setup
+
+      - name: Proxy behaviour
+        run: ./test.sh
+
+      - name: Container logs
+        if: failure()
+        run: docker compose -p wpp-test logs --tail 100

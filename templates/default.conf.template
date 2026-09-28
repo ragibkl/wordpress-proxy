@@ -1,0 +1,109 @@
+# wordpress-proxy: a caching reverse proxy for WordPress.
+#
+# For the official nginx image. Mount this directory at /etc/nginx/templates;
+# on startup the image renders it to /etc/nginx/conf.d/default.conf,
+# substituting environment variables that are set (nginx's own $variables are
+# left alone). Required environment:
+#
+#   UPSTREAM_URL                       e.g. http://wordpress
+#   NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1 fills ${NGINX_LOCAL_RESOLVERS} from
+#                                      /etc/resolv.conf (Docker or cluster DNS)
+
+proxy_cache_path /var/cache/nginx/wordpress levels=1:2 keys_zone=wordpress:10m
+                 max_size=2g inactive=7d use_temp_path=off;
+
+# The scheme the visitor used: X-Forwarded-Proto from a TLS terminator in
+# front (ingress, load balancer), else our own. It's part of the cache key and
+# is forwarded to WordPress, so each scheme gets the response WordPress
+# renders for it.
+map $http_x_forwarded_proto $forwarded_proto {
+    default $http_x_forwarded_proto;
+    ""      $scheme;
+}
+
+server {
+    listen 80;
+    client_max_body_size 50M;
+
+    # Re-resolve the upstream name (a recreated container gets a new IP).
+    resolver ${NGINX_LOCAL_RESOLVERS} valid=10s;
+    # Fail fast when WordPress is gone: its name stops resolving, or (for up
+    # to `valid`) resolves to a dead IP. Both default to waiting 30-60s.
+    resolver_timeout 5s;
+    proxy_connect_timeout 5s;
+    set $upstream ${UPSTREAM_URL};
+
+    # The proxy's own liveness, independent of WordPress.
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    # Everything that must not be cached: logged-in users, admin, logins,
+    # feeds, carts, query strings, anything but GET/HEAD.
+    set $no_cache 0;
+    if ($request_method !~ ^(GET|HEAD)$) {
+        set $no_cache 1;
+    }
+    if ($query_string != "") {
+        set $no_cache 1;
+    }
+    if ($request_uri ~* "/wp-admin/|/wp-json/|/xmlrpc\.php|wp-.*\.php|/feed/|index\.php|sitemap(_index)?\.xml|[a-z0-9_-]+-sitemap[0-9]*\.xml|/cart/|/checkout/|/my-account/") {
+        set $no_cache 1;
+    }
+    if ($http_cookie ~* "comment_author|wordpress_[a-f0-9]+|wp-postpass|wordpress_no_cache|wordpress_logged_in|woocommerce_items_in_cart|woocommerce_cart_hash") {
+        set $no_cache 1;
+    }
+    # Static assets are cached even with a ?ver= query string.
+    if ($uri ~* "\.(css|js|png|jpe?g|gif|webp|avif|svg|ico|woff2?)$") {
+        set $no_cache 0;
+    }
+
+    # Uncacheable requests go straight through, cookies and all.
+    error_page 418 = @dynamic;
+    if ($no_cache) {
+        return 418;
+    }
+
+    location / {
+        proxy_pass $upstream;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Proto $forwarded_proto;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+        # Keyed by scheme and host, so a request for another host or scheme
+        # can't replace the page other visitors get. Only 200s (and brief
+        # 404s) are cached: never redirects or errors.
+        proxy_cache wordpress;
+        proxy_cache_key $forwarded_proto://$http_host$request_uri;
+        proxy_cache_valid 200 5m;
+        proxy_cache_valid 404 1m;
+
+        # WordPress sends no-cache headers and cookies on public pages too
+        # (plugins); decide here instead, and never hand one visitor's
+        # cookie to everyone: Set-Cookie is stripped from cacheable
+        # responses. Pages that need cookies are in the @dynamic list above.
+        proxy_ignore_headers Cache-Control Expires Set-Cookie;
+        proxy_hide_header Set-Cookie;
+
+        # Serve stale pages while refreshing in the background, and while
+        # WordPress is down or erroring. One request refreshes at a time.
+        proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+        proxy_cache_background_update on;
+        proxy_cache_lock on;
+        proxy_cache_lock_age 30s;
+
+        add_header X-Cache-Status $upstream_cache_status always;
+    }
+
+    location @dynamic {
+        proxy_pass $upstream;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Proto $forwarded_proto;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        add_header X-Cache-Status BYPASS always;
+    }
+}

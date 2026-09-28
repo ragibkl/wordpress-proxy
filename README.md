@@ -1,131 +1,122 @@
 # Wordpress Proxy
 
-HTTP Caching Proxy Layer docker image for Wordpress
+A drop-in caching layer for WordPress: one nginx config file for the
+**official `nginx` image**. No custom image to build.
 
 ## Description
 
-![alt text](docs/architecture.drawio.png)
+![architecture](docs/architecture.drawio.png)
 
-Wordpress Proxy is a reverse proxy caching layer for Wordpress. It is based on Nginx, but using the official OpenResty Docker image instead. The reason for using OpenResty is to make use of `resolver local=on` statement, for better dns compatibility with Kubernetes.
+A typical WordPress site generates every page dynamically from PHP and MySQL.
+With a few plugins and a complex theme, that takes a noticeable time per page.
+Wordpress Proxy sits in front of WordPress and caches pages for anonymous
+visitors, so repeat visits are served by nginx in milliseconds.
 
-Typically, a Wordpress site is deployed on top of a Linux, Apache, MySQL and PHP (LAMP) stack. After a fresh install, with minimal plugins and a basic theme, page load times on a Wordpress site is quite low.
+It also keeps serving cached pages while WordPress or its database is down or
+erroring. That keeps the site up, but it also hides the outage: monitor the
+WordPress backend directly, not just the public URL.
 
-However, on a typical site with several plugins and a complex theme installed, page load times can be significant. This is because each time a page is accessed, Wordpress has to generate each page dynamically from its content and the MySQL database.
+## Usage
 
-To improve page load times for our users, we can put the Wordpress site behind a proxy caching layer (wordpress-proxy).
+Everything is in [`templates/default.conf.template`](templates/default.conf.template).
+The official nginx image renders `/etc/nginx/templates/*.template` on startup,
+substituting environment variables, so you only need to mount the directory
+and set two variables:
 
-When a user access a page for the first time through the proxy, it first fetches the content from the Wordpress site. This content is then cached in memory, and served to the user.
+| Variable | Value |
+| --- | --- |
+| `UPSTREAM_URL` | Base URL of the WordPress site, e.g. `http://wordpress` |
+| `NGINX_ENTRYPOINT_LOCAL_RESOLVERS` | `1`: lets nginx re-resolve `UPSTREAM_URL` (a recreated container gets a new IP) using the Docker or cluster DNS from `/etc/resolv.conf` |
 
-Subsequent page accesses through the proxy will load the content from the cache. This results in a much shorter page load times.
+### Docker Compose
 
-This app is packaged as a Docker image and publish to DockerHub [here](https://hub.docker.com/r/ragibkl/wordpress-proxy).
-
-## Environment Variables
-
-### `UPSTREAM_URL`
-
-Base url of the upstream wordpress site. Wordpress proxy will proxy the requests to this url.
-
-Default: `http://wordpress`
-
-Example values:
-
-- `http://backend.example.com` - upstream site is running on another host, reachable via the domain name
-- `http://123.123.123.123` - upstream site is running on another host, reachable via ip-address
-- `http://localhost:8080` - upstream site is running locally on port 8080
-- `http://wordpress` - upstream site is running in a Docker container with the name `wordpress`, running in the same `docker-compose` setup
-
-## Examples
-
-The following are example deployments using `docker-compose`
-
-### Standalone deployment using docker-compose
-
-file: `docker-compose.yaml`
+[`docker-compose.yml`](docker-compose.yml) is a complete example (proxy,
+WordPress, MariaDB). To put the proxy in front of an existing WordPress, you
+only need this service and the `templates` directory:
 
 ```yaml
-version: "3"
-
 services:
   wordpress-proxy:
-    image: ragibkl/wordpress-proxy
+    image: nginx:1.29-alpine
     ports:
       - 80:80
     environment:
-      UPSTREAM_URL: http://backend.example.com # base url of the upstream wordpress site
-      # UPSTREAM_URL: http://123.123.123.123 # base url of the upstream wordpress using ip address
-      # UPSTREAM_URL: http://localhost:8080 # base url of the upstream wordpress running locally on a different port
+      UPSTREAM_URL: http://wordpress
+      NGINX_ENTRYPOINT_LOCAL_RESOLVERS: "1"
+    volumes:
+      - ./templates:/etc/nginx/templates:ro
 ```
 
-### Deployed with Wordpress and MySQL using docker-compose
+### Kubernetes
 
-file: `docker-compose.yaml`
+[`k8s/wordpress-proxy.yaml`](k8s/wordpress-proxy.yaml) is a Deployment and
+Service with the template mounted from a ConfigMap:
 
-```yaml
-version: "3"
-
-services:
-  mariadb:
-    image: mariadb:10
-    volumes:
-      - mariadb-data:/var/lib/mysql
-    environment:
-      MYSQL_DATABASE: wordpress
-      MYSQL_PASSWORD: password
-      MYSQL_ROOT_PASSWORD: password
-      MYSQL_USER: user
-
-  wordpress:
-    image: wordpress
-    volumes:
-      - wordpress-data:/var/www/html/wp-content
-    environment:
-      WORDPRESS_DB_HOST: mariadb
-      WORDPRESS_DB_NAME: wordpress
-      WORDPRESS_DB_PASSWORD: password
-      WORDPRESS_DB_USER: user
-
-  wordpress-proxy:
-    image: ragibkl/wordpress-proxy
-    ports:
-      - 80:80
-    environment:
-      UPSTREAM_URL: http://wordpress # same name as the wordpress container
-
-volumes:
-  mariadb-data:
-  wordpress-data:
+```bash
+kubectl create configmap wordpress-proxy-templates \
+  --from-file=templates/default.conf.template
+kubectl apply -f k8s/wordpress-proxy.yaml
 ```
 
-## Development
+Point your Ingress at the `wordpress-proxy` Service. It must pass the real
+`Host` and `X-Forwarded-Proto` headers (ingress-nginx does by default).
 
-### Getting Started
+## Behaviour
 
-1. Ensure that `docker` and `docker-compose` are installed on your machine
-2. Clone this repo and cd into the project directory
-   ```
-   git clone git@github.com:ragibkl/wordpress-proxy.git
-   cd wordpress-proxy
-   ```
-3. Run the start script. This will generate a simple nginx config file. Next, it will spin up a Wordpress site, behind a worpress-proxy nginx service to run locally
-   ```
-   ./scripts/start.sh
-   ```
-4. Give it a few minutes. Try accessing `http://localhost/` from your browser. Once everything is loaded, go ahead and install the site as normal
-5. During development, after making changes to the related files, run the start script again to see your changes
-6. When done, run the stop script. This will also remove any data or volumes that were created during development
-   ```
-   ./scripts/stop.sh
-   ```
+- **Cached:** anonymous `GET`/`HEAD` requests for pages (200s for 5 minutes,
+  404s for 1 minute) and static assets (also with `?ver=`). The cache key is
+  scheme + host + URI.
+- **Never cached:** redirects and errors; logged-in users and recent
+  commenters (by cookie); `wp-admin`, `wp-json`, logins, `xmlrpc.php`, feeds,
+  sitemaps, WooCommerce cart/checkout/account; any query string; any method
+  but `GET`/`HEAD`. These go straight to WordPress with cookies intact.
+- **`Set-Cookie` is stripped from cached responses**, so one visitor's cookie
+  is never served to everyone. Plugins that must set cookies for anonymous
+  visitors need their pages on the never-cached list.
+- **Stale pages** are served while a page is refreshed in the background, and
+  while WordPress is down or returning 5xx.
+- **`X-Cache-Status`** response header: `HIT`, `MISS`, `STALE`, `UPDATING`,
+  or `BYPASS`.
+- **`/healthz`** is answered by nginx itself, for probes.
 
-## Contributing
+There is no purge: after editing content, anonymous visitors see the update
+within 5 minutes.
 
-1. Currently, there is only one variable that can be tuned from the environment, i.e `UPSTREAM_URL`. Maybe we can add more if there is a use case
-2. There might be more improvements that can be made to the template file for better performance
-3. Build process is still manual, and I only target `nginx:latest`
-4. Feel free to suggest more improvements. Issues and pull requests are welcome!
+## Testing
 
-## Credits
+[`test.sh`](test.sh) checks the behaviour above against the compose stack,
+and runs in CI on every push and pull request
+([`.github/workflows/test.yml`](.github/workflows/test.yml)):
 
-This image was inspired by the work of others, especially the `nginx` part.
-TODO: I've lost the references to them, but will add them in when I remember.
+- **fresh install:** a new WordPress redirects to its installer without
+  caching the redirect, and installs through the proxy like a browser would
+- **caching and bypass:** including a test plugin that sets a cookie on every
+  public page, and a real login
+- **cache poisoning:** unknown hosts, the wrong scheme, redirects
+- **WordPress down:** cached pages still served, uncached ones fail fast
+- **re-resolution:** WordPress comes back on a new IP, no proxy restart
+
+```bash
+docker compose -p wpp-test up -d --wait wordpress-proxy
+./test.sh fresh   # new WordPress: install it through the proxy
+./test.sh setup   # permalinks + the cookie-setting test plugin
+./test.sh
+docker compose -p wpp-test down -v
+```
+
+## Upgrading from the `ragibkl/wordpress-proxy` image
+
+The Docker Hub image (OpenResty, last built 2022) is deprecated. Replace it with
+`nginx:<version>` plus the template, as above. Differences from the old
+config:
+
+- The cache key includes the host and scheme, and only 200/404 responses are
+  cached. The old config cached redirects under a key without the host, so a
+  single request with the wrong `Host` or scheme could put a redirect loop in
+  front of every visitor.
+- `Set-Cookie` is stripped from cached responses instead of being cached and
+  served to everyone.
+- `X-Forwarded-Proto` is set explicitly instead of relying on it being passed
+  through.
+- Pages are cached for 5 minutes instead of 15, and failures to reach
+  WordPress time out in 5 seconds instead of 60.
