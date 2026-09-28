@@ -2,7 +2,8 @@
 # Behaviour tests for the proxy config, against the docker-compose stack.
 #
 #   docker compose -p wpp-test up -d
-#   ./test.sh setup    # installs WordPress + a test plugin (first time only)
+#   ./test.sh fresh    # new WordPress: install it through the proxy (first time only)
+#   ./test.sh setup    # permalinks + a cookie-setting test plugin (first time only)
 #   ./test.sh
 #
 # The test plugin sets a cookie on every public page, like the popup and
@@ -20,16 +21,6 @@ wp() {
     -e WORDPRESS_DB_USER=wordpress -e WORDPRESS_DB_PASSWORD=change-me \
     wordpress:cli wp "$@"
 }
-
-if [ "${1:-}" = setup ]; then
-  until wp db check >/dev/null 2>&1; do sleep 3; done
-  wp core install --url="$URL" --title="Proxy Test" --admin_user=admin \
-    --admin_password=testpass123 --admin_email=admin@example.com --skip-email
-  wp option update permalink_structure '/%postname%/'
-  wp rewrite flush --hard
-  wp eval 'wp_mkdir_p(WP_CONTENT_DIR . "/mu-plugins"); file_put_contents(WP_CONTENT_DIR . "/mu-plugins/test-cookie.php", "<?php\nadd_action(\"init\", function () { if (!is_admin()) setcookie(\"test_popup\", \"seen\", 0, \"/\"); });\n");'
-  exit
-fi
 
 has() {  # has <pattern> <text>: pattern found? (no pipes: pipefail + grep -q misreport)
   if [[ "$2" == *"$1"* ]]; then echo yes; else echo no; fi
@@ -49,7 +40,50 @@ req() {
 }
 u() { echo "$URL/$1-$RANDOM$RANDOM/"; }  # a fresh uncached path
 
-until curl -s -o /dev/null "$URL/healthz"; do sleep 1; done
+wait_for() {  # wait_for <seconds> <what> <command...>: bounded, so CI can't hang
+  local deadline=$((SECONDS + $1)) what=$2; shift 2
+  until "$@" >/dev/null 2>&1; do
+    if [ $SECONDS -ge $deadline ]; then echo "timed out waiting for $what"; exit 1; fi
+    sleep 2
+  done
+}
+done_() { echo; echo "$PASS passed, $FAIL failed"; [ "$FAIL" -eq 0 ]; exit; }
+
+wait_for 60 "the proxy" curl -sf -o /dev/null "$URL/healthz"
+
+if [ "${1:-}" = fresh ]; then
+  # A brand-new WordPress, installed through the proxy like a browser would.
+  wait_for 180 "WordPress to reach its database" \
+    bash -c "[[ \$(curl -s -o /dev/null -w '%{http_code}' $URL/) == 30[12] ]]"
+  echo "# fresh install"
+  check "uninstalled site redirects to the installer" "302 yes" \
+    "$(req "$URL/" | awk '{print $1}') $(has 'wp-admin/install.php' "$(curl -s -o /dev/null -w '%{redirect_url}' "$URL/")")"
+  check "...and that redirect is not cached" "302 MISS" "$(req "$URL/" | awk '{print $1, $2}')"
+  check "installer bypasses the cache" "200 BYPASS" "$(req "$URL/wp-admin/install.php" | awk '{print $1, $2}')"
+  body=$(curl -s "$URL/wp-admin/install.php?step=2" \
+    --data-urlencode weblog_title="Proxy Test" --data-urlencode user_name=admin \
+    --data-urlencode admin_password=testpass123 --data-urlencode admin_password2=testpass123 \
+    --data-urlencode pw_weak=1 --data-urlencode admin_email=admin@example.com \
+    --data-urlencode blog_public=0 --data-urlencode Submit="Install WordPress")
+  check "install through the proxy succeeds" "yes" "$(has 'Success!' "$body")"
+  check "installed site serves the front page, not a cached redirect" "200" "$(req "$URL/" | awk '{print $1}')"
+  done_
+fi
+
+if [ "${1:-}" = setup ]; then
+  # Pretty permalinks and a plugin that sets a cookie on every public page.
+  # Installs WordPress too if `fresh` hasn't.
+  wait_for 180 "the database" wp db check
+  wp core is-installed || wp core install --url="$URL" --title="Proxy Test" --admin_user=admin \
+    --admin_password=testpass123 --admin_email=admin@example.com --skip-email
+  wp option update permalink_structure '/%postname%/'
+  # wp-cli can't tell Apache has mod_rewrite, so --hard would write an empty
+  # .htaccess block (and a browser install leaves one): every pretty URL 404s.
+  wp eval 'file_put_contents(ABSPATH . "wp-cli.yml", "apache_modules:\n  - mod_rewrite\n");'
+  wp rewrite flush --hard
+  wp eval 'wp_mkdir_p(WP_CONTENT_DIR . "/mu-plugins"); file_put_contents(WP_CONTENT_DIR . "/mu-plugins/test-cookie.php", "<?php\nadd_action(\"init\", function () { if (!is_admin()) setcookie(\"test_popup\", \"seen\", 0, \"/\"); });\n");'
+  exit
+fi
 
 echo "# proxy"
 check "healthz answers without WordPress" "200" "$(curl -s -o /dev/null -w '%{http_code}' "$URL/healthz")"
@@ -110,6 +144,4 @@ sleep 11  # resolver valid=10s
 check "proxy reaches WordPress at its new IP without a restart" "200" \
   "$(for i in 1 2 3 4 5; do c=$(curl -s -o /dev/null -w '%{http_code}' "$URL/?reresolve=$RANDOM"); [ "$c" = 200 ] && break; sleep 2; done; echo "$c")"
 
-echo
-echo "$PASS passed, $FAIL failed"
-[ "$FAIL" -eq 0 ]
+done_

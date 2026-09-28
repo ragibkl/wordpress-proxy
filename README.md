@@ -84,13 +84,22 @@ within 5 minutes.
 
 ## Testing
 
-[`test.sh`](test.sh) checks all of the above against the compose stack,
-including cache poisoning (unknown hosts, wrong scheme), serving stale pages
-with WordPress stopped, and re-resolving WordPress on a new IP:
+[`test.sh`](test.sh) checks the behaviour above against the compose stack,
+and runs in CI on every push and pull request
+([`.github/workflows/test.yml`](.github/workflows/test.yml)):
+
+- **fresh install:** a new WordPress redirects to its installer without
+  caching the redirect, and installs through the proxy like a browser would
+- **caching and bypass:** including a test plugin that sets a cookie on every
+  public page, and a real login
+- **cache poisoning:** unknown hosts, the wrong scheme, redirects
+- **WordPress down:** cached pages still served, uncached ones fail fast
+- **re-resolution:** WordPress comes back on a new IP, no proxy restart
 
 ```bash
-docker compose -p wpp-test up -d
-./test.sh setup   # first time: installs WordPress and a cookie-setting test plugin
+docker compose -p wpp-test up -d --wait wordpress-proxy
+./test.sh fresh   # new WordPress: install it through the proxy
+./test.sh setup   # permalinks + the cookie-setting test plugin
 ./test.sh
 docker compose -p wpp-test down -v
 ```
